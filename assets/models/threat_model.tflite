@@ -1,0 +1,86 @@
+import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
+import 'package:tflite_flutter/tflite_flutter.dart';
+
+class ClassifierService {
+  Interpreter? _interpreter;
+  Map<String, int> _vocab = {};
+  bool isLoaded = false;
+
+  // உங்கள் மாடலின் மேக்ஸ் சீக்வென்ஸ் நீளம் (Standard sequence length)
+  final int maxSeqLen = 50;
+
+  // 1. TFLite மாடல் மற்றும் Vocab.txt ஏற்றுதல்
+  Future<void> loadModel() async {
+    try {
+      // Load interpreter from assets
+      _interpreter = await Interpreter.fromAsset('assets/models/threat_model.tflite');
+      debugPrint('GovShield: TFLite model loaded successfully.');
+
+      // Load vocabulary file
+      final vocabData = await rootBundle.loadString('assets/models/vocab.txt');
+      final lines = vocabData.split('\n');
+      _vocab.clear();
+      for (int i = 0; i < lines.length; i++) {
+        final token = lines[i].trim();
+        if (token.isNotEmpty) {
+          _vocab[token] = i;
+        }
+      }
+      debugPrint('GovShield: Vocab loaded with ${_vocab.length} tokens.');
+      isLoaded = true;
+    } catch (e) {
+      debugPrint('GovShield Model Load Error: $e');
+      isLoaded = false;
+    }
+  }
+
+  // 2. Text Preprocessing & Inference (Dynamic Prediction)
+  Future<Map<String, dynamic>> predict(String text) async {
+    if (!isLoaded || _interpreter == null) {
+      debugPrint('GovShield: Model not loaded yet, returning fallback.');
+      return {'score': 0.05, 'latency': 0};
+    }
+
+    final stopwatch = Stopwatch()..start();
+
+    // Text tokenization: சிறப்புக் குறிகளை நீக்கி வார்த்தைகளாகப் பிரித்தல்
+    final cleanText = text.toLowerCase().replaceAll(RegExp(r'[^\w\s]'), ' ');
+    final words = cleanText.split(RegExp(r'\s+')).where((w) => w.isNotEmpty).toList();
+
+    // Fixed sequence padding (0-pad)
+    List<int> inputSequence = List.filled(maxSeqLen, 0);
+    int oovIndex = _vocab['<OOV>'] ?? _vocab['<unk>'] ?? 1;
+
+    for (int i = 0; i < words.length && i < maxSeqLen; i++) {
+      inputSequence[i] = _vocab[words[i]] ?? oovIndex;
+    }
+
+    // Input tensor: shape [1, 50]
+    var input = [inputSequence];
+
+    // Output tensor: shape [1, 1] (binary probability)
+    var output = List.filled(1 * 1, 0.0).reshape([1, 1]);
+
+    try {
+      _interpreter!.run(input, output);
+    } catch (e) {
+      debugPrint("GovShield Inference Run Error: $e");
+    }
+
+    stopwatch.stop();
+
+    double rawScore = output[0][0];
+    // Score-ஐ 0.0 முதல் 1.0 வரை உறுதிப்படுத்துதல்
+    double threatScore = rawScore.clamp(0.0, 1.0);
+
+    return {
+      'score': threatScore,
+      'latency': stopwatch.elapsedMilliseconds,
+    };
+  }
+
+  void dispose() {
+    _interpreter?.close();
+  }
+}
